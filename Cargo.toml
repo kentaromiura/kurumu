@@ -1,0 +1,16 @@
+[package]
+name = "kurumu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+oxc_allocator = "0.52.0"
+oxc_ast = { version = "0.52.0", features = ["serialize"] }
+oxc_estree = { version = "0.52.0", features = ["serialize"] }
+oxc_parser = "0.52.0"
+oxc_span = "0.52.0"
+pico-args = "0.5.0"
+emotionless = { git = "https://github.com/kentaromiura/emotionless.git" }
+oxc_codegen = "0.52.0"
+oxc_traverse = "0.52.0"
+oxc_resolver = "4.2.0"
