@@ -65,7 +65,7 @@ fn main() -> Result<(), String> {
     to_process_next.push(entry_file.to_string());
     loop {
         // while to_process_next.len() > 0
-        let name = to_process_next.pop().unwrap();
+        let name = to_process_next.remove(0);
         let (full_path, ncp) = match resolver.resolve(&current_path, &name) {
             Err(error) => {
                 println!("Error: {error}");

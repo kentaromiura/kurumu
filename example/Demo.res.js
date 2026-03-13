@@ -4,7 +4,7 @@ let a = require("./a");
 let b = require("./1/test");
 
 console.log(
-  "Hello, world!" +
+  "Hello, world!\n" +
     Object.keys(a)
       .map((k) => `${k} ${a[k]}`)
       .join(""),
