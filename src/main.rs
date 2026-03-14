@@ -1,19 +1,23 @@
 #![expect(clippy::print_stdout)]
+use std::hash::Hash;
+//use std::any::Any;
 use std::{fs, path::Path};
 
 use oxc_allocator::{Allocator, FromIn};
 use oxc_ast;
 use oxc_ast::ast::*;
 //use oxc_ast::utf8_to_utf16::Utf8ToUtf16;
-use oxc_codegen::{CodeGenerator, CodegenOptions};
-
+use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::ParserReturn;
 use oxc_parser::{ParseOptions, Parser};
+use oxc_resolver::{ResolveOptions, Resolver};
 use oxc_span::SourceType;
+//use oxc_transformer::Transformer;
+use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_traverse::{Traverse, TraverseCtx, traverse_mut};
+
 use pico_args::Arguments;
 use std::collections::HashMap;
-
-use oxc_resolver::{ResolveOptions, Resolver};
 // https://stackoverflow.com/a/50278316
 fn format_radix(mut x: u32, radix: u32) -> String {
     let mut result = vec![];
@@ -195,8 +199,8 @@ fn main() -> Result<(), String> {
             codegen(&ret, true)
         ));
 
-        //println!("\n\nAST:");
-        //println!("{}", &ret.program.to_pretty_json());
+        // println!("\n\nAST:");
+        // println!("{}", &ret.program.to_pretty_json());
 
         if to_process_next.len() == 0 {
             break;
@@ -204,7 +208,7 @@ fn main() -> Result<(), String> {
     }
 
     let modules = format!("{{{}}}", modules_src.join(","));
-    println!(
+    let source_text = format!(
         "(function (modules, global) {{
         var cache = {{}}, require = function (id) {{
                 var module = cache[id];
@@ -220,13 +224,269 @@ fn main() -> Result<(), String> {
         modules
     );
 
+    //let source_text = fs::read_to_string(path).map_err(|_| format!("Missing '{name}'"))?;
+    let source_type = SourceType::from_path("out.js").unwrap();
+
+    let mut ret = Parser::new(&allocator, &source_text, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    let mut my_t = HtmlCssTransform {
+        css_cache: HashMap::new(),
+        collected_css: Vec::new(),
+        counter: 0,
+    };
+
+    let src_transformed = css_handler(&mut ret, &mut my_t, &allocator);
+    println!("{}", src_transformed);
     Ok(())
 }
 
+struct HtmlCssTransform {
+    css_cache: HashMap<String, u32>, // css content -> class id
+    pub collected_css: Vec<String>,  // (class_id, css)
+    counter: u32,
+}
+
+impl HtmlCssTransform {
+    fn extract_css(&mut self, call: &mut CallExpression) -> String {
+        let _ = dbg!(&call);
+        /*
+        var pink = Html.css([
+              "\n&:hover {\n    color: ",
+              ";\n}"
+            ], [pinkColor]);
+            ---
+            arguments: Vec(
+                    [
+                        ArrayExpression(
+                            ArrayExpression {
+                                span: Span {
+                                    start: 611,
+                                    end: 643,
+                                },
+                                elements: Vec(
+                                    [
+                                        TemplateLiteral(
+                                            TemplateLiteral {
+                                                span: Span {
+                                                    start: 612,
+                                                    end: 636,
+                                                },
+                                                quasis: Vec(
+                                                    [
+                                                        TemplateElement {
+                                                            span: Span {
+                                                                start: 613,
+                                                                end: 635,
+                                                            },
+                                                            value: TemplateElementValue {
+                                                                raw: "\n&:hover {\n    color: ",
+                                                                cooked: Some(
+                                                                    "\n&:hover {\n    color: ",
+                                                                ),
+                                                            },
+                                                            tail: true,
+                                                        },
+                                                    ],
+                                                ),
+                                                expressions: Vec(
+                                                    [],
+                                                ),
+                                            },
+                                        ),
+                                        TemplateLiteral(
+                                            TemplateLiteral {
+                                                span: Span {
+                                                    start: 637,
+                                                    end: 642,
+                                                },
+                                                quasis: Vec(
+                                                    [
+                                                        TemplateElement {
+                                                            span: Span {
+                                                                start: 638,
+                                                                end: 641,
+                                                            },
+                                                            value: TemplateElementValue {
+                                                                raw: ";\n}",
+                                                                cooked: Some(
+                                                                    ";\n}",
+                                                                ),
+                                                            },
+                                                            tail: true,
+                                                        },
+                                                    ],
+                                                ),
+                                                expressions: Vec(
+                                                    [],
+                                                ),
+                                            },
+                                        ),
+                                    ],
+                                ),
+                                trailing_comma: None,
+                            },
+                        ),
+                        ArrayExpression(
+                            ArrayExpression {
+                                span: Span {
+                                    start: 644,
+                                    end: 655,
+                                },
+                                elements: Vec(
+                                    [
+                                        Identifier(
+                                            IdentifierReference {
+                                                span: Span {
+                                                    start: 645,
+                                                    end: 654,
+                                                },
+                                                name: "pinkColor",
+                                                reference_id: Cell {
+                                                    value: Some(
+                                                        ReferenceId(
+                                                            19,
+                                                        ),
+                                                    ),
+                                                },
+                                            },
+                                        ),
+                                    ],
+                                ),
+                                trailing_comma: None,
+                            },
+                        ),
+                    ],
+         */
+        String::from("")
+    }
+
+    fn get_or_create_id(&mut self, css: String) -> u32 {
+        if let Some(id) = self.css_cache.get(&css) {
+            return *id;
+        } else {
+            let id = self.counter;
+            self.counter += 1;
+            let transformed = emotionless::next(id, css);
+            self.css_cache.insert(transformed.clone(), id);
+            self.collected_css.push(transformed.clone());
+            id
+        }
+    }
+
+    fn is_html_css_call(&mut self, call: &mut CallExpression) -> bool {
+        if call.callee.is_member_expression() {
+            if let Some(me) = call.callee.get_member_expr() {
+                if me.is_specific_member_access("Html", "css") {
+                    return true;
+                }
+                return false;
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+}
+struct TraverseState {}
+impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform {
+    fn exit_expression(
+        &mut self,
+        expr: &mut Expression<'a>,
+        ctx: &mut TraverseCtx<'a, TraverseState>,
+    ) {
+        let is_target = if let Expression::CallExpression(call) = expr {
+            self.is_html_css_call(call)
+        } else {
+            false
+        };
+
+        if is_target {
+            //let _ = dbg!(&expr);
+            if let Expression::CallExpression(call) = expr {
+                //let _ = dbg!(expr.parent());
+                //println!("Gotcha on exit");
+                let css = self.extract_css(call);
+                let id = self.get_or_create_id(css);
+                *expr = ctx.ast.expression_string_literal(
+                    call.span,
+                    ctx.ast.atom(&id.to_string()),
+                    None,
+                );
+            }
+        }
+    }
+
+    fn enter_call_expression(
+        &mut self,
+        node: &mut CallExpression<'a>,
+        _ctx: &mut TraverseCtx<'a, TraverseState>,
+    ) {
+        // if node.callee.is_member_expression() {
+        //     if let Some(me) = node.callee.get_member_expr() {
+        //         if me.is_specific_member_access("Html", "css") {
+        //             let _ = dbg!(&me);
+        //             let _ = dbg!(_ctx.parent());
+        //             println!("Gotcha")
+        //         }
+        //     }
+        // }
+        //
+        //if(node.callee.type === 'MemberExpression' && path.node.callee.property.name === 'css' && path.node.callee.object.name == 'Html')
+
+        // // Read parent
+        // if let Ancestor::BinaryExpressionRight(bin_expr_ref) = ctx.parent() {
+        //     // This is legal
+        //     if let Expression::Identifier(id) = bin_expr_ref.left() {
+        //         println!("left side is ID: {}", &id.name);
+        //     }
+
+        //     // This would be a compile failure, because the right side is where we came from
+        //     // dbg!(bin_expr_ref.right());
+        // }
+
+        // // Read grandparent
+        // if let Ancestor::ExpressionStatementExpression(stmt_ref) = ctx.ancestor(1) {
+        //     // This is legal
+        //     println!("expression stmt's span: {:?}", stmt_ref.span());
+
+        //     // This would be a compile failure, because the expression is where we came from
+        //     // dbg!(stmt_ref.expression());
+        // }
+    }
+}
+
+fn css_handler<'a>(
+    pr: &mut ParserReturn<'a>,
+    my_t: &mut HtmlCssTransform,
+    allocator: &'a Allocator,
+) -> String {
+    // let ret = Transformer::new(&allocator, path, &transform_options)
+    //        .build_with_scoping(scoping, &mut program);
+
+    //let allocator = Allocator::default();
+    //Transformer::new(allocator, source_path, options)
+    // let ret = Transformer::new(&allocator, path, &transform_options)
+    //     .build_with_scoping(scoping, &mut program);
+    let scoping = SemanticBuilder::new()
+        .build(&pr.program)
+        .semantic
+        .into_scoping();
+    let state = TraverseState {};
+    //let _scoping =
+    let __ret = traverse_mut(my_t, allocator, &mut pr.program, scoping, state);
+
+    codegen(&pr, true)
+    //"".to_string()
+}
 //https://github.com/oxc-project/oxc/blob/main/crates/oxc_codegen/examples/codegen.rs
 fn codegen(ret: &ParserReturn<'_>, minify: bool) -> String {
     //ret.program.with_mut(||)
-    CodeGenerator::new()
+    Codegen::new()
         .with_options(CodegenOptions {
             minify,
             ..CodegenOptions::default()

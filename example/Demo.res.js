@@ -2,6 +2,18 @@
 "use strict";
 let a = require("./a");
 let b = require("./1/test");
+let Html = {css:() => {}}
+let red = "red"
+
+
+var pinkColor = "mistyrose";
+
+var pink = Html.css([
+      "\n&:hover {\n    color: ",
+      ";\n}"
+    ], [pinkColor]);
+
+
 
 console.log(
   "Hello, world!\n" +
