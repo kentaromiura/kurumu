@@ -1,6 +1,4 @@
 #![expect(clippy::print_stdout)]
-use std::hash::Hash;
-//use std::any::Any;
 use std::{fs, path::Path};
 
 use oxc_allocator::{Allocator, FromIn};
@@ -13,7 +11,7 @@ use oxc_parser::{ParseOptions, Parser};
 use oxc_resolver::{ResolveOptions, Resolver};
 use oxc_span::SourceType;
 //use oxc_transformer::Transformer;
-use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_semantic::SemanticBuilder;
 use oxc_traverse::{Traverse, TraverseCtx, traverse_mut};
 
 use pico_args::Arguments;
@@ -236,6 +234,7 @@ fn main() -> Result<(), String> {
     let mut my_t = HtmlCssTransform {
         css_cache: HashMap::new(),
         collected_css: Vec::new(),
+        collected_variables: Vec::new(),
         counter: 0,
     };
 
@@ -244,124 +243,85 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-struct HtmlCssTransform {
+struct HtmlCssTransform<'a> {
     css_cache: HashMap<String, u32>, // css content -> class id
     pub collected_css: Vec<String>,  // (class_id, css)
     counter: u32,
+    pub collected_variables: Vec<(u32, Vec<Expression<'a>>, Vec<String>)>, // id -> (expressions, units)
 }
 
-impl HtmlCssTransform {
-    fn extract_css(&mut self, call: &mut CallExpression) -> String {
-        let _ = dbg!(&call);
-        /*
-        var pink = Html.css([
-              "\n&:hover {\n    color: ",
-              ";\n}"
-            ], [pinkColor]);
-            ---
-            arguments: Vec(
-                    [
-                        ArrayExpression(
-                            ArrayExpression {
-                                span: Span {
-                                    start: 611,
-                                    end: 643,
-                                },
-                                elements: Vec(
-                                    [
-                                        TemplateLiteral(
-                                            TemplateLiteral {
-                                                span: Span {
-                                                    start: 612,
-                                                    end: 636,
-                                                },
-                                                quasis: Vec(
-                                                    [
-                                                        TemplateElement {
-                                                            span: Span {
-                                                                start: 613,
-                                                                end: 635,
-                                                            },
-                                                            value: TemplateElementValue {
-                                                                raw: "\n&:hover {\n    color: ",
-                                                                cooked: Some(
-                                                                    "\n&:hover {\n    color: ",
-                                                                ),
-                                                            },
-                                                            tail: true,
-                                                        },
-                                                    ],
-                                                ),
-                                                expressions: Vec(
-                                                    [],
-                                                ),
-                                            },
-                                        ),
-                                        TemplateLiteral(
-                                            TemplateLiteral {
-                                                span: Span {
-                                                    start: 637,
-                                                    end: 642,
-                                                },
-                                                quasis: Vec(
-                                                    [
-                                                        TemplateElement {
-                                                            span: Span {
-                                                                start: 638,
-                                                                end: 641,
-                                                            },
-                                                            value: TemplateElementValue {
-                                                                raw: ";\n}",
-                                                                cooked: Some(
-                                                                    ";\n}",
-                                                                ),
-                                                            },
-                                                            tail: true,
-                                                        },
-                                                    ],
-                                                ),
-                                                expressions: Vec(
-                                                    [],
-                                                ),
-                                            },
-                                        ),
-                                    ],
-                                ),
-                                trailing_comma: None,
-                            },
-                        ),
-                        ArrayExpression(
-                            ArrayExpression {
-                                span: Span {
-                                    start: 644,
-                                    end: 655,
-                                },
-                                elements: Vec(
-                                    [
-                                        Identifier(
-                                            IdentifierReference {
-                                                span: Span {
-                                                    start: 645,
-                                                    end: 654,
-                                                },
-                                                name: "pinkColor",
-                                                reference_id: Cell {
-                                                    value: Some(
-                                                        ReferenceId(
-                                                            19,
-                                                        ),
-                                                    ),
-                                                },
-                                            },
-                                        ),
-                                    ],
-                                ),
-                                trailing_comma: None,
-                            },
-                        ),
-                    ],
-         */
-        String::from("")
+impl<'a> HtmlCssTransform<'a> {
+    fn extract_css<'b>(&mut self, allocator: &'a Allocator, call: &'b mut CallExpression<'a>) -> (String, Vec<Expression<'a>>, Vec<String>) {
+        let mut strings = Vec::new();
+        let mut substitutions = 0;
+
+        if call.arguments.is_empty() {
+            return (String::new(), vec![], vec![]);
+        }
+
+        if let Some(Argument::ArrayExpression(arr)) = call.arguments.get(0) {
+            for el in &arr.elements {
+                match el {
+                    ArrayExpressionElement::StringLiteral(s) => {
+                        strings.push(s.value.as_str().to_string());
+                    }
+                    ArrayExpressionElement::TemplateLiteral(t) => {
+                        if let Some(quasi) = t.quasis.first() {
+                            let value = quasi.value.raw.as_str().to_string();
+                            strings.push(value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut extracted_expressions = Vec::new();
+        let unique_id = self.counter;
+        self.counter += 1;
+
+        if let Some(Argument::ArrayExpression(arr)) = call.arguments.get_mut(1) {
+            substitutions = arr.elements.len();
+            let elements = std::mem::replace(&mut arr.elements, oxc_allocator::Vec::new_in(allocator));
+            for el in elements {
+                match el {
+                    ArrayExpressionElement::Identifier(id) => {
+                        extracted_expressions.push(Expression::Identifier(id));
+                    }
+                    ArrayExpressionElement::TemplateLiteral(t) => {
+                        extracted_expressions.push(Expression::TemplateLiteral(t));
+                    }
+                    ArrayExpressionElement::StringLiteral(s) => {
+                        extracted_expressions.push(Expression::StringLiteral(s));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut css = String::new();
+        let mut units = Vec::new();
+
+        if !strings.is_empty() {
+            css.push_str(&strings[0]);
+
+            for i in 0..substitutions {
+                css.push_str(&format!("var(--kentacss{}-{})", unique_id, i));
+                let mut unit_str = String::new();
+                if i + 1 < strings.len() {
+                    let next_str = &strings[i + 1];
+                    if let Some(semicolon_idx) = next_str.find(';') {
+                        css.push_str(&next_str[semicolon_idx..]);
+                        unit_str = next_str[..semicolon_idx].to_string();
+                    } else {
+                        unit_str = next_str.clone();
+                    }
+                }
+                units.push(unit_str);
+            }
+        }
+
+        (css, extracted_expressions, units)
     }
 
     fn get_or_create_id(&mut self, css: String) -> u32 {
@@ -393,7 +353,7 @@ impl HtmlCssTransform {
     }
 }
 struct TraverseState {}
-impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform {
+impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform<'a> {
     fn exit_expression(
         &mut self,
         expr: &mut Expression<'a>,
@@ -410,10 +370,14 @@ impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform {
             if let Expression::CallExpression(call) = expr {
                 //let _ = dbg!(expr.parent());
                 //println!("Gotcha on exit");
-                let css = self.extract_css(call);
+                let span = call.span;
+                let (css, extracted, units) = self.extract_css(ctx.ast.allocator, call);
                 let id = self.get_or_create_id(css);
+                if !extracted.is_empty() {
+                    self.collected_variables.push((id, extracted, units));
+                }
                 *expr = ctx.ast.expression_string_literal(
-                    call.span,
+                    span,
                     ctx.ast.atom(&id.to_string()),
                     None,
                 );
@@ -423,7 +387,7 @@ impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform {
 
     fn enter_call_expression(
         &mut self,
-        node: &mut CallExpression<'a>,
+        _node: &mut CallExpression<'a>,
         _ctx: &mut TraverseCtx<'a, TraverseState>,
     ) {
         // if node.callee.is_member_expression() {
@@ -462,7 +426,7 @@ impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform {
 
 fn css_handler<'a>(
     pr: &mut ParserReturn<'a>,
-    my_t: &mut HtmlCssTransform,
+    my_t: &mut HtmlCssTransform<'a>,
     allocator: &'a Allocator,
 ) -> String {
     // let ret = Transformer::new(&allocator, path, &transform_options)
