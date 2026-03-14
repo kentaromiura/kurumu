@@ -239,7 +239,10 @@ fn main() -> Result<(), String> {
     };
 
     let src_transformed = css_handler(&mut ret, &mut my_t, &allocator);
+    fs::write("out-k.css", my_t.collected_css.join("\n")).map_err(|e| e.to_string())?;
     println!("{}", src_transformed);
+    println!("\n\n");
+    dbg!(my_t.collected_variables);
     Ok(())
 }
 
@@ -376,9 +379,10 @@ impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform<'a> {
                 if !extracted.is_empty() {
                     self.collected_variables.push((id, extracted, units));
                 }
+                let atom_id = "km".to_string() + &id.to_string();
                 *expr = ctx.ast.expression_string_literal(
                     span,
-                    ctx.ast.atom(&id.to_string()),
+                    ctx.ast.atom(atom_id.as_str()),
                     None,
                 );
             }
