@@ -4,27 +4,23 @@ use std::{fs, path::Path};
 use oxc_allocator::{Allocator, FromIn};
 use oxc_ast;
 use oxc_ast::ast::*;
-//use oxc_ast::utf8_to_utf16::Utf8ToUtf16;
 use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::ParserReturn;
 use oxc_parser::{ParseOptions, Parser};
 use oxc_resolver::{ResolveOptions, Resolver};
-use oxc_span::SourceType;
-//use oxc_transformer::Transformer;
 use oxc_semantic::SemanticBuilder;
-use oxc_traverse::{Traverse, TraverseCtx, traverse_mut};
+use oxc_span::SourceType;
+use oxc_traverse::{traverse_mut, Traverse, TraverseCtx};
 
 use pico_args::Arguments;
 use std::collections::HashMap;
-// https://stackoverflow.com/a/50278316
+
 fn format_radix(mut x: u32, radix: u32) -> String {
     let mut result = vec![];
 
     loop {
         let m = x % radix;
         x = x / radix;
-
-        // will panic if you use a bad radix (< 2 or > 36).
         result.push(std::char::from_digit(m, radix).unwrap());
         if x == 0 {
             break;
@@ -44,11 +40,11 @@ fn main() -> Result<(), String> {
     let options = ResolveOptions {
         alias_fields: vec![vec!["browser".into()]],
         alias: vec![],
-        extensions: vec![".js".into()],
-        extension_alias: vec![(".js".into(), vec![".ts".into(), ".js".into()])],
-        // ESM
-        //condition_names: vec!["node".into(), "import".into()],
-        // CJS
+        extensions: vec![".js".into(), ".ts".into(), ".res.js".into()],
+        extension_alias: vec![
+            (".js".into(), vec![".ts".into(), ".js".into()]),
+            (".res.js".into(), vec![".js".into()]),
+        ],
         condition_names: vec!["node".into(), "require".into()],
         ..ResolveOptions::default()
     };
@@ -66,7 +62,6 @@ fn main() -> Result<(), String> {
     }
     to_process_next.push(entry_file.to_string());
     loop {
-        // while to_process_next.len() > 0
         let name = to_process_next.remove(0);
         let (full_path, ncp) = match resolver.resolve(&current_path, &name) {
             Err(error) => {
@@ -152,7 +147,6 @@ fn main() -> Result<(), String> {
                 }
                 if let Statement::ExpressionStatement(es) = x {
                     let es_mut = es as &mut ExpressionStatement;
-
                     let e = &mut es_mut.expression;
                     if e.is_require_call() {
                         if let Expression::CallExpression(call_expr) = e {
@@ -197,9 +191,6 @@ fn main() -> Result<(), String> {
             codegen(&ret, true)
         ));
 
-        // println!("\n\nAST:");
-        // println!("{}", &ret.program.to_pretty_json());
-
         if to_process_next.len() == 0 {
             break;
         }
@@ -222,7 +213,6 @@ fn main() -> Result<(), String> {
         modules
     );
 
-    //let source_text = fs::read_to_string(path).map_err(|_| format!("Missing '{name}'"))?;
     let source_type = SourceType::from_path("out.js").unwrap();
 
     let mut ret = Parser::new(&allocator, &source_text, source_type)
@@ -234,32 +224,33 @@ fn main() -> Result<(), String> {
     let mut my_t = HtmlCssTransform {
         css_cache: HashMap::new(),
         collected_css: Vec::new(),
-        collected_variables: Vec::new(),
         counter: 0,
+        iife_statements: Vec::new(),
     };
 
     let src_transformed = css_handler(&mut ret, &mut my_t, &allocator);
     fs::write("out-k.css", my_t.collected_css.join("\n")).map_err(|e| e.to_string())?;
     println!("{}", src_transformed);
-    println!("\n\n");
-    dbg!(my_t.collected_variables);
     Ok(())
 }
 
 struct HtmlCssTransform<'a> {
-    css_cache: HashMap<String, u32>, // css content -> class id
-    pub collected_css: Vec<String>,  // (class_id, css)
+    css_cache: HashMap<String, u32>,
+    pub collected_css: Vec<String>,
     counter: u32,
-    pub collected_variables: Vec<(u32, Vec<Expression<'a>>, Vec<String>)>, // id -> (expressions, units)
+    pub iife_statements: Vec<Statement<'a>>,
 }
 
 impl<'a> HtmlCssTransform<'a> {
-    fn extract_css<'b>(&mut self, allocator: &'a Allocator, call: &'b mut CallExpression<'a>) -> (String, Vec<Expression<'a>>, Vec<String>) {
+    fn extract_css<'b>(
+        &mut self,
+        call: &'b mut CallExpression<'a>,
+    ) -> (String, Vec<String>, Vec<String>, u32) {
         let mut strings = Vec::new();
         let mut substitutions = 0;
 
         if call.arguments.is_empty() {
-            return (String::new(), vec![], vec![]);
+            return (String::new(), vec![], vec![], 0);
         }
 
         if let Some(Argument::ArrayExpression(arr)) = call.arguments.get(0) {
@@ -279,26 +270,18 @@ impl<'a> HtmlCssTransform<'a> {
             }
         }
 
-        let mut extracted_expressions = Vec::new();
+        let mut extracted_strings = Vec::new();
+        // Get the ID first (before incrementing)
         let unique_id = self.counter;
-        self.counter += 1;
 
-        if let Some(Argument::ArrayExpression(arr)) = call.arguments.get_mut(1) {
+        if let Some(Argument::ArrayExpression(arr)) = call.arguments.get(1) {
             substitutions = arr.elements.len();
-            let elements = std::mem::replace(&mut arr.elements, oxc_allocator::Vec::new_in(allocator));
-            for el in elements {
-                match el {
-                    ArrayExpressionElement::Identifier(id) => {
-                        extracted_expressions.push(Expression::Identifier(id));
-                    }
-                    ArrayExpressionElement::TemplateLiteral(t) => {
-                        extracted_expressions.push(Expression::TemplateLiteral(t));
-                    }
-                    ArrayExpressionElement::StringLiteral(s) => {
-                        extracted_expressions.push(Expression::StringLiteral(s));
-                    }
-                    _ => {}
-                }
+            for el in &arr.elements {
+                let expr_str = match el {
+                    ArrayExpressionElement::Identifier(id) => id.name.to_string(),
+                    _ => "undefined".to_string(),
+                };
+                extracted_strings.push(expr_str);
             }
         }
 
@@ -324,7 +307,7 @@ impl<'a> HtmlCssTransform<'a> {
             }
         }
 
-        (css, extracted_expressions, units)
+        (css, extracted_strings, units, unique_id)
     }
 
     fn get_or_create_id(&mut self, css: String) -> u32 {
@@ -355,7 +338,9 @@ impl<'a> HtmlCssTransform<'a> {
         }
     }
 }
+
 struct TraverseState {}
+
 impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform<'a> {
     fn exit_expression(
         &mut self,
@@ -369,62 +354,55 @@ impl<'a> Traverse<'a, TraverseState> for HtmlCssTransform<'a> {
         };
 
         if is_target {
-            //let _ = dbg!(&expr);
             if let Expression::CallExpression(call) = expr {
-                //let _ = dbg!(expr.parent());
-                //println!("Gotcha on exit");
                 let span = call.span;
-                let (css, extracted, units) = self.extract_css(ctx.ast.allocator, call);
+                let (css, extracted_strings, _units, css_var_id) = self.extract_css(call);
                 let id = self.get_or_create_id(css);
-                if !extracted.is_empty() {
-                    self.collected_variables.push((id, extracted, units));
+
+                // Use css_var_id for the CSS variable name to match the CSS output
+                let variable_id = css_var_id;
+
+                // Check if we're inside an object expression with a style property
+                let mut has_style_property = false;
+
+                for ancestor in ctx.ancestors() {
+                    if ancestor.is_object_expression() {
+                        // Found an object expression - check if it has a style property
+                        // For now, we'll generate IIFE if not inside a style property
+                        has_style_property = false;
+                        break;
+                    }
                 }
+
+                if !extracted_strings.is_empty() && !has_style_property {
+                    // Generate IIFE statements
+                    for (i, _expr_str) in extracted_strings.iter().enumerate() {
+                        let iife_code = format!(
+                            "((body,name,value)=>{{if(body){{body.style.setProperty(name,value)}}document.addEventListener('DOMContentLoaded',()=>{{document.body.style.setProperty(name,value)}})}})(document.body,'--kentacss{}-{}',{})",
+                            variable_id, i, _expr_str
+                        );
+
+                        let source_type = SourceType::from_path("iife.js").unwrap();
+                        let iife_source = Atom::from_in(iife_code.as_str(), ctx.ast.allocator);
+                        let iife_ret =
+                            Parser::new(ctx.ast.allocator, iife_source.as_str(), source_type)
+                                .with_options(ParseOptions::default())
+                                .parse();
+                        if let Some(Statement::ExpressionStatement(es)) =
+                            iife_ret.program.body.into_iter().next()
+                        {
+                            self.iife_statements
+                                .push(Statement::ExpressionStatement(es));
+                        }
+                    }
+                }
+
                 let atom_id = "km".to_string() + &id.to_string();
-                *expr = ctx.ast.expression_string_literal(
-                    span,
-                    ctx.ast.atom(atom_id.as_str()),
-                    None,
-                );
+                *expr =
+                    ctx.ast
+                        .expression_string_literal(span, ctx.ast.atom(atom_id.as_str()), None);
             }
         }
-    }
-
-    fn enter_call_expression(
-        &mut self,
-        _node: &mut CallExpression<'a>,
-        _ctx: &mut TraverseCtx<'a, TraverseState>,
-    ) {
-        // if node.callee.is_member_expression() {
-        //     if let Some(me) = node.callee.get_member_expr() {
-        //         if me.is_specific_member_access("Html", "css") {
-        //             let _ = dbg!(&me);
-        //             let _ = dbg!(_ctx.parent());
-        //             println!("Gotcha")
-        //         }
-        //     }
-        // }
-        //
-        //if(node.callee.type === 'MemberExpression' && path.node.callee.property.name === 'css' && path.node.callee.object.name == 'Html')
-
-        // // Read parent
-        // if let Ancestor::BinaryExpressionRight(bin_expr_ref) = ctx.parent() {
-        //     // This is legal
-        //     if let Expression::Identifier(id) = bin_expr_ref.left() {
-        //         println!("left side is ID: {}", &id.name);
-        //     }
-
-        //     // This would be a compile failure, because the right side is where we came from
-        //     // dbg!(bin_expr_ref.right());
-        // }
-
-        // // Read grandparent
-        // if let Ancestor::ExpressionStatementExpression(stmt_ref) = ctx.ancestor(1) {
-        //     // This is legal
-        //     println!("expression stmt's span: {:?}", stmt_ref.span());
-
-        //     // This would be a compile failure, because the expression is where we came from
-        //     // dbg!(stmt_ref.expression());
-        // }
     }
 }
 
@@ -433,27 +411,22 @@ fn css_handler<'a>(
     my_t: &mut HtmlCssTransform<'a>,
     allocator: &'a Allocator,
 ) -> String {
-    // let ret = Transformer::new(&allocator, path, &transform_options)
-    //        .build_with_scoping(scoping, &mut program);
-
-    //let allocator = Allocator::default();
-    //Transformer::new(allocator, source_path, options)
-    // let ret = Transformer::new(&allocator, path, &transform_options)
-    //     .build_with_scoping(scoping, &mut program);
     let scoping = SemanticBuilder::new()
         .build(&pr.program)
         .semantic
         .into_scoping();
     let state = TraverseState {};
-    //let _scoping =
-    let __ret = traverse_mut(my_t, allocator, &mut pr.program, scoping, state);
+    let _ret = traverse_mut(my_t, allocator, &mut pr.program, scoping, state);
 
-    codegen(&pr, true)
-    //"".to_string()
+    // Prepend collected IIFE statements to the program body
+    for stmt in my_t.iife_statements.drain(..) {
+        pr.program.body.insert(0, stmt);
+    }
+
+    codegen(pr, true)
 }
-//https://github.com/oxc-project/oxc/blob/main/crates/oxc_codegen/examples/codegen.rs
+
 fn codegen(ret: &ParserReturn<'_>, minify: bool) -> String {
-    //ret.program.with_mut(||)
     Codegen::new()
         .with_options(CodegenOptions {
             minify,
